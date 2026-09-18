@@ -1,11 +1,12 @@
 """The deposit-lot ledger: the money side, append-only, and entirely its own.
 
 Spec D6. There are **two** ledgers and they touch at exactly one point — a
-vesting deposit lot minting a points lot, which belongs to the ticket that adds
-the loyalty-rate bonus. Until then nothing crosses at all: no claim, no gift and
-no points movement of any kind reaches a deposit lot, and no withdrawal reaches
-the points balance (spec D10). The two ledgers do not even share a vocabulary of
-reasons; this one speaks `DepositEntryReason`.
+vesting deposit lot minting a points lot on the other side (spec D22), which the
+nightly sweep does at the seam by *reading* this ledger. Nothing crosses in the
+other direction and nothing crosses into this one: no claim, no gift, no vesting
+and no points movement of any kind reaches a deposit lot, and no withdrawal
+reaches the points balance (spec D10). The two ledgers do not even share a
+vocabulary of reasons; this one speaks `DepositEntryReason`.
 
 A positive entry opens a **deposit lot** — money from one deposit, carrying its
 own recurring twelve-month anniversary clock from the day it landed. A negative
@@ -45,7 +46,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from .clock import add_months, in_brussels
@@ -136,6 +137,39 @@ def anniversary_after(deposited_at: datetime, as_of: datetime) -> datetime:
         years += 1
         anniversary = add_months(deposited_at, ANNIVERSARY_MONTHS * years)
     return anniversary
+
+
+def anniversaries_through(deposited_at: datetime, business_date: date) -> list[date]:
+    """Every anniversary of this lot that has arrived by `business_date`, oldest first.
+
+    The other end of `anniversary_after`: that one asks which anniversary is
+    coming, this one asks which have been reached and are therefore owed a
+    bonus (spec D22). The sweep needs the list rather than the next one,
+    because a night that did not run leaves more than one due at once (spec
+    D20) and each is paid separately, on its own date.
+
+    **An anniversary is a date, not an instant.** A lot deposited at 03:30 is
+    twelve months old at 03:30, half an hour after the 03:00 sweep, and the
+    bonus is still paid that morning: the rule customers are told is "every
+    year on the day you paid in", and the clamping of spec D27 is calendar
+    arithmetic already. Comparing instants would make the hour a deposit
+    happened to land at decide which night it vests on, and would hold a
+    03:30 deposit's bonus back a full day every year. So this answers in
+    dates, and the caller decides which instant on the day to stamp.
+
+    Counted from the original deposit date every time, like `anniversary_after`
+    and for the same reason: a 29 February lot alternates between 28 and 29
+    February rather than drifting a day earlier every leap cycle (spec D27).
+    """
+    deposited_at = in_brussels(deposited_at)
+    due: list[date] = []
+    years = 1
+    anniversary = add_months(deposited_at, ANNIVERSARY_MONTHS).date()
+    while anniversary <= business_date:
+        due.append(anniversary)
+        years += 1
+        anniversary = add_months(deposited_at, ANNIVERSARY_MONTHS * years).date()
+    return due
 
 
 @dataclass(frozen=True)
@@ -359,6 +393,22 @@ class DepositLedger:
             deposited_at=datetime.fromisoformat(row["occurred_at"]),
             amount_cents=int(row["amount_cents"]),
         )
+
+    def customers_with_lots(self) -> list[str]:
+        """Every customer this ledger has ever opened a deposit lot for.
+
+        The vesting sweep's working set, and deliberately a wide one: whether a
+        lot still has money on it, and whether its anniversary has come round,
+        are both conclusions of the replay (`position`), not facts a row holds.
+        A customer who withdrew everything is still in here and vests nothing —
+        cheap at demo scale, and the shape a production sweep would replace
+        with an index over a due date it maintained as lots drained.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT customer_id FROM deposit_ledger WHERE reason = ?",
+            (DepositEntryReason.DEPOSIT.value,),
+        ).fetchall()
+        return [row["customer_id"] for row in rows]
 
     def has_entry_for(
         self,

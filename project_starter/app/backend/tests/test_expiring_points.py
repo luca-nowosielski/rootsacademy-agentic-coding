@@ -125,7 +125,10 @@ def test_a_lot_is_gone_from_the_balance_on_day_366_when_the_sweep_has_run(servic
         clock.advance(timedelta(days=1))
         service.run_daily_sweep()
 
-    assert service.balance(CUSTOMER) == 0
+    # The ten base points are gone. The single point left is the loyalty bonus
+    # the deposit lot vested on the anniversary it passed on the way (spec
+    # D22), which is a new lot on its own twelve-month clock.
+    assert service.balance(CUSTOMER) == 1
 
 
 def test_points_are_still_spendable_the_day_before_they_expire(service, clock):
@@ -246,15 +249,22 @@ def test_a_claim_is_paid_for_out_of_what_is_still_alive(service, clock):
 
 
 def test_the_sweep_writes_the_expiry_down_and_changes_nothing_by_running(service, clock):
-    """Spec D18 and user story 38, in one: the sweep records, it does not decide."""
-    deposit(service, euros="10", deposit_id="dep-1")
+    """Spec D18 and user story 38, in one: the sweep records, it does not decide.
+
+    True of expiry, and deliberately not true of everything the sweep does:
+    vesting a loyalty bonus is the sweep deciding (spec D22). This deposit is
+    under €10, so its bonus floors to nothing (spec D24) and the night has
+    only the expiry to write down.
+    """
+    deposit(service, euros="9", deposit_id="dep-1")
     clock.advance(timedelta(days=366))
 
     before = readable(service)
     result = service.run_daily_sweep()
 
     assert result.lots_expired == 1
-    assert result.points_expired == 10
+    assert result.points_expired == 9
+    assert (result.lots_vested, result.points_vested) == (0, 0)
     assert result.customers_affected == 1
     assert readable(service) == before
 
@@ -294,7 +304,9 @@ def test_catching_two_nights_up_lands_where_running_each_night_lands(worlds):
     caught_up.run_daily_sweep(tonight)
 
     assert readable(nightly) == readable(caught_up)
-    assert nightly.balance(CUSTOMER) == 0
+    # The base points expired and the anniversary the catch-up passed vested
+    # its bonus, on its own date either way (spec D22).
+    assert nightly.balance(CUSTOMER) == 1
 
 
 def test_the_sweep_runs_against_the_date_it_is_given(service, clock):
@@ -322,7 +334,7 @@ def test_the_sweep_takes_todays_date_from_the_injected_clock(service, clock):
     clock.advance(timedelta(days=366))
 
     assert service.run_daily_sweep().business_date == clock.today()
-    assert service.balance(CUSTOMER) == 0
+    assert service.balance(CUSTOMER) == 1  # the base expired, the bonus vested
 
 
 def test_one_sweep_covers_every_customer(service, clock):
@@ -333,8 +345,10 @@ def test_one_sweep_covers_every_customer(service, clock):
     result = service.run_daily_sweep()
 
     assert (result.customers_affected, result.lots_expired, result.points_expired) == (2, 2, 35)
-    assert service.balance(CUSTOMER) == 0
-    assert service.balance(OTHER_CUSTOMER) == 0
+    assert (result.lots_vested, result.points_vested) == (2, 3)
+    # Each customer is left with their own lot's anniversary bonus (spec D22).
+    assert service.balance(CUSTOMER) == 1
+    assert service.balance(OTHER_CUSTOMER) == 2
 
 
 def test_a_lot_spent_before_its_anniversary_is_never_written_off(service, clock):
@@ -381,11 +395,14 @@ def test_the_expiry_reads_above_the_deposit_it_killed(service, clock):
     clock.advance(timedelta(days=366))
     service.run_daily_sweep()
 
-    newest, oldest = service.history(CUSTOMER)
+    newest, bonus, oldest = service.history(CUSTOMER)
 
     assert (newest.reason, newest.points) == (Reason.EXPIRY, -30)
+    # The same night vested the anniversary bonus, dated the start of the
+    # anniversary; the expiry happened later that day and reads above it.
+    assert (bonus.reason, bonus.points) == (Reason.VESTING, 3)
     assert (oldest.reason, oldest.points) == (Reason.DEPOSIT, 30)
-    assert newest.occurred_at > oldest.occurred_at
+    assert newest.occurred_at > bonus.occurred_at > oldest.occurred_at
 
 
 def test_a_balance_read_at_a_future_instant_answers_for_that_instant(service, clock):
@@ -407,22 +424,32 @@ def test_an_expiry_does_not_take_points_the_customer_had_already_spent(service, 
     clock.advance(timedelta(days=366))
     service.run_daily_sweep()
 
-    assert service.balance(CUSTOMER) == 0
+    # Thirty earned, ten claimed, twenty expired, three vested on the
+    # anniversary the sweep passed (spec D22) — and it still adds up.
+    assert service.balance(CUSTOMER) == 3
     assert service.balance(CUSTOMER) == sum(m.points for m in service.history(CUSTOMER))
 
 
 def test_a_clawback_against_expired_points_still_reads_back_negative(service, clock):
-    """Spec D11 survives expiry: nothing is floored, and nothing is taken twice."""
+    """Spec D11 survives expiry: nothing is floored, and nothing is taken twice.
+
+    The reversal claws back **exactly what the deposit credited** — its 30
+    base points — and not the 3 the anniversary vested before it bounced. That
+    is D11 read strictly, and it is an open question rather than a settled
+    rule: whether a deposit that never stood should keep having paid a bonus
+    is the question ticket LB-8 is blocked on. What is settled either way is
+    that the reversed lot stops standing, so no further anniversary vests.
+    """
     deposit(service, euros="30", deposit_id="dep-1")
     clock.advance(timedelta(days=366))
     service.run_daily_sweep()
 
     service.handle(DepositReversed(customer_id=CUSTOMER, deposit_id="dep-1"))
 
-    assert service.balance(CUSTOMER) == -30
+    assert service.balance(CUSTOMER) == -27
 
     deposit(service, euros="30", deposit_id="dep-2")
-    assert service.balance(CUSTOMER) == 0
+    assert service.balance(CUSTOMER) == 3
 
 
 def test_a_sweep_cannot_be_run_for_a_night_that_has_not_happened(service, clock):
@@ -490,7 +517,8 @@ def test_tonights_sweep_leaves_a_lot_that_is_still_alive_when_it_runs(service, c
     caught_up = service.run_daily_sweep()
 
     assert (caught_up.lots_expired, caught_up.points_expired) == (1, 100)
-    assert service.balance(CUSTOMER) == 0
+    # €200 standing vested 20 on the anniversary the first sweep ran into.
+    assert service.balance(CUSTOMER) == 20
     assert service.balance(CUSTOMER) == sum(m.points for m in service.history(CUSTOMER))
 
 
@@ -502,11 +530,15 @@ def test_two_lots_dying_in_the_same_instant_read_the_same_before_and_after_the_s
     deposit(service, euros="40", deposit_id="dep-b")
     clock.set(TWELVE_MONTHS_ON + timedelta(days=1))
 
-    before = readable(service)
+    before = expiries(service)
     result = service.run_daily_sweep()
 
     assert (result.lots_expired, result.points_expired) == (2, 50)
-    assert readable(service) == before
+    # The two expiries read exactly as they did before the job ran. The sweep
+    # also vested the two anniversaries it passed, which is new history rather
+    # than a re-ordering of this.
+    assert expiries(service) == before
+    assert (result.lots_vested, result.points_vested) == (2, 5)
 
 
 def test_the_balance_is_the_sum_of_the_history_at_every_instant(service, clock):
@@ -538,12 +570,16 @@ class Timeline:
     read_on: int
     balance: int
     expired: int
+    #: The loyalty bonus the sweep vests for the anniversaries this timeline
+    #: has passed (spec D22). It is not in `balance`, which is read before the
+    #: sweep runs: expiry has already happened by then and vesting has not.
+    vested: int = 0
 
 
 TIMELINES = (
-    Timeline("untouched, read the day before", ((0, "10"),), (), 364, 10, 0),
-    Timeline("untouched, read on the anniversary", ((0, "10"),), (), 365, 0, 10),
-    Timeline("untouched, read the day after", ((0, "10"),), (), 366, 0, 10),
+    Timeline("untouched, read the day before", ((0, "10"),), (), 364, 10, 0, 0),
+    Timeline("untouched, read on the anniversary", ((0, "10"),), (), 365, 0, 10, 1),
+    Timeline("untouched, read the day after", ((0, "10"),), (), 366, 0, 10, 1),
     Timeline(
         "the older lot was spent, so nothing dies",
         ((0, "10"), (30, "10")),
@@ -551,6 +587,7 @@ TIMELINES = (
         365,
         10,
         0,
+        1,
     ),
     Timeline(
         "the newer lot was left, so the older one dies",
@@ -559,6 +596,7 @@ TIMELINES = (
         365,
         10,
         10,
+        1,
     ),
     Timeline(
         "one claim across two lots leaves the remainder to die later",
@@ -567,6 +605,7 @@ TIMELINES = (
         396,
         0,
         20,
+        6,
     ),
     Timeline(
         "part of a lot spent, the rest expires",
@@ -575,6 +614,7 @@ TIMELINES = (
         366,
         0,
         30,
+        4,
     ),
     Timeline(
         "a lot earned after the first one died",
@@ -583,8 +623,9 @@ TIMELINES = (
         400,
         25,
         10,
+        1,
     ),
-    Timeline("nothing earned, nothing to expire", (), (), 400, 0, 0),
+    Timeline("nothing earned, nothing to expire", (), (), 400, 0, 0, 0),
 )
 
 
@@ -607,8 +648,19 @@ def test_expiry_timelines(service, clock, timeline: Timeline):
     assert service.balance(CUSTOMER) == timeline.balance
     assert sum(-m.points for m in expiries(service)) == timeline.expired
 
-    # And the sweep only writes down what the read above already showed.
-    before = readable(service)
-    service.run_daily_sweep()
-    assert readable(service) == before
-    assert service.balance(CUSTOMER) == timeline.balance
+    # The sweep writes down the expiry the read above already showed, and
+    # vests whatever anniversaries the timeline has passed (spec D22). Running
+    # it again does neither a second time (spec T6).
+    expired_before = expiries(service)
+    swept = service.run_daily_sweep()
+    settled = readable(service)
+    again = service.run_daily_sweep()
+
+    # Not `points_expired`: the read above is taken at 10:30 and the sweep
+    # stamps 03:00, so a lot that dies during the anniversary day is already
+    # out of the balance and is written off the following night (spec D18).
+    assert swept.points_vested == timeline.vested
+    assert expiries(service) == expired_before
+    assert service.balance(CUSTOMER) == timeline.balance + timeline.vested
+    assert (again.points_expired, again.points_vested) == (0, 0)
+    assert readable(service) == settled

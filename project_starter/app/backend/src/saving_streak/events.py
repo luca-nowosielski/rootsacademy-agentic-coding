@@ -42,11 +42,11 @@ class DepositSource(str, Enum):
 class MovementReason(str, Enum):
     """Why a points movement happened. Every ledger entry carries one.
 
-    The points ledger holds points lots (earned) and consumption entries
-    (claimed, gifted, expired, clawed back) — spec D6. Four of those reasons
-    exist so far; the rest arrive with the tickets that own them, and a reason
-    is never reused to stand in for another, because a ledger entry is what the
-    customer and a support agent read back as fact.
+    The points ledger holds points lots (earned, vested) and consumption
+    entries (claimed, gifted, expired, clawed back) — spec D6. Five of those
+    reasons exist so far; the rest arrive with the tickets that own them, and a
+    reason is never reused to stand in for another, because a ledger entry is
+    what the customer and a support agent read back as fact.
     """
 
     DEPOSIT = "deposit"
@@ -57,6 +57,13 @@ class MovementReason(str, Enum):
     #: entry is written by the nightly sweep, but the points are gone from the
     #: balance the moment the clock passes, sweep or no sweep (spec D18).
     EXPIRY = "expiry"
+    #: The loyalty-rate bonus: a deposit lot reaching an anniversary with money
+    #: still standing on it mints an ordinary points lot for 10% of that
+    #: money's base points (spec D19/D22). This is the one reason on this side
+    #: that a deposit lot causes, and the only crossing between the two ledgers
+    #: of spec D6 — it still mints a *points* entry, in this ledger's own
+    #: vocabulary, rather than borrowing the money side's.
+    VESTING = "vesting"
 
 
 class DepositEntryReason(str, Enum):
@@ -64,10 +71,11 @@ class DepositEntryReason(str, Enum):
 
     The deposit-lot ledger is the *other* ledger of spec D6, and this enum is
     deliberately not `MovementReason`: the two ledgers touch at exactly one
-    point (a vesting deposit lot minting a points lot, which is a later
-    ticket), and sharing a vocabulary of reasons between them would make it
-    look as though a claim could reach a deposit lot or a withdrawal could
-    reach the balance. They cannot.
+    point — a vesting deposit lot minting a points lot, which is written on the
+    points side as `MovementReason.VESTING` and leaves no entry here at all —
+    and sharing a vocabulary of reasons between them would make it look as
+    though a claim could reach a deposit lot or a withdrawal could reach the
+    balance. They cannot.
 
     A positive entry opens a **deposit lot**; a negative one consumes deposit
     lots, oldest first (spec D8).

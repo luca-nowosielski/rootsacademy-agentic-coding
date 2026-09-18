@@ -9,8 +9,10 @@ The two ledgers stay two. A deposit is the one event that writes to both — a
 points lot on one side, a deposit lot on the other — and it writes to each
 through that ledger's own guards, never using one to decide something about the
 other. A claim touches only the points ledger; a withdrawal touches only the
-deposit-lot ledger (spec D10). The single crossing of spec D6, a vesting
-deposit lot minting a points lot, is a later ticket's.
+deposit-lot ledger (spec D10). The single crossing of spec D6 — a vesting
+deposit lot minting a points lot — happens in the nightly sweep, and it crosses
+one way: the money side is read, the points side is written, and no deposit lot
+is ever spent to pay a bonus.
 
 Later tickets extend the same seam with `gift`.
 """
@@ -24,7 +26,15 @@ from decimal import ROUND_FLOOR, Decimal
 from .catalogue import Catalogue, CatalogueItem, current_catalogue
 from .claims import ClaimRecord, ClaimRecords
 from .clock import Clock, in_brussels, readable_instant
-from .deposits import DepositLedger, DepositLot, OpenedLot, cents_landing, cents_leaving, euros
+from .deposits import (
+    DepositLedger,
+    DepositLot,
+    OpenedLot,
+    anniversaries_through,
+    cents_landing,
+    cents_leaving,
+    euros,
+)
 from .events import (
     ClaimReward,
     DepositEntryReason,
@@ -41,6 +51,11 @@ from .vouchers import IssuanceRequest, VoucherIssuanceFailed, VoucherIssuer
 #: The base mechanic: one point per euro deposited (spec D9).
 POINTS_PER_EURO = 1
 
+#: The loyalty rate: each anniversary a deposit lot survives pays this share of
+#: the surviving portion's base points (spec D22). Of *base*, always — never of
+#: base-plus-accrued, so the bonus does not compound (spec D23).
+BONUS_RATE = Decimal("0.10")
+
 #: The hour the nightly sweep runs, Europe/Brussels (spec D20). It is the
 #: business date that identifies a run, not the moment it happens to start:
 #: a night that failed is replayed by asking for the same date again.
@@ -55,6 +70,24 @@ def base_points_for(amount_eur: Decimal) -> int:
     """
     whole_euros = int(amount_eur.to_integral_value(rounding=ROUND_FLOOR))
     return whole_euros * POINTS_PER_EURO
+
+
+def bonus_points_for(outstanding_eur: Decimal) -> int:
+    """The loyalty-rate bonus a lot pays on one anniversary (spec D22/D24).
+
+    Floored twice, and the two floors are different questions. The first is
+    the one every amount of money in this system answers: whole euros make
+    whole base points, so a surviving €30.50 is 30 base points (spec D4). The
+    second is the rate: a tenth of 30 points is 3 points, and a tenth of 9 is
+    nothing at all. Neither floor can stand in for the other — €9.99 would
+    round its way to a point through the first, and a €10 lot would lose its
+    single point to the second if the rate were taken on the euros.
+
+    A lot too small to pay anything pays nothing, and that is the intended
+    answer rather than a rounding accident: a €5 deposit vests 0 (spec D24).
+    """
+    base = base_points_for(outstanding_eur)
+    return int((base * BONUS_RATE).to_integral_value(rounding=ROUND_FLOOR))
 
 
 @dataclass(frozen=True)
@@ -77,6 +110,12 @@ class SweepResult:
 
     business_date: date
     swept_at: datetime
+    #: Anniversaries that paid a bonus (spec D22) — not lots, because one lot
+    #: caught up over three years pays three of them. An anniversary whose
+    #: bonus floored to nothing is not counted: nothing was written, so there
+    #: is nothing for a re-run to report differently.
+    anniversaries_vested: int
+    points_vested: int
     lots_expired: int
     points_expired: int
     customers_affected: int
@@ -137,6 +176,28 @@ def _expiry_of(lot: PointsLot) -> str:
         f"Expired: {lot.remaining} points earned on {lot.earned_at.date().isoformat()}"
         f" reached {EXPIRY_MONTHS} months unspent"
     )
+
+
+def _vesting_of(lot: DepositLot, points: int) -> str:
+    """The history line for a deposit lot's anniversary bonus.
+
+    It names the money the bonus was worked out on and the day that money
+    landed, because those are the two things the customer cannot re-derive
+    from the number: the movement's own stamp is the anniversary, and the
+    amount standing is what a withdrawal may since have changed (spec D25). A
+    support agent reading the line back has the whole sum in front of them.
+    """
+    rate = f"{(BONUS_RATE * 100).normalize():f}%"  # the rate as told: `10%`
+    return (
+        f"Loyalty bonus: {points} points, {rate} of the"
+        f" {_euros(lot.outstanding_eur)} still standing from the deposit on"
+        f" {lot.deposited_at.date().isoformat()}"
+    )
+
+
+def _start_of(business_date: date) -> datetime:
+    """Midnight opening `business_date` in Brussels (spec D5)."""
+    return in_brussels(datetime.combine(business_date, time()))
 
 
 def _deposit_lot_of(amount_eur: Decimal, account_id: str) -> str:
@@ -484,32 +545,40 @@ class SavingStreakService:
         )
 
     def run_daily_sweep(self, business_date: date | None = None) -> SweepResult:
-        """Materialise the expiries that fell due, for one business date.
+        """Vest the anniversaries and materialise the expiries of one business date.
 
         A plain function at the seam (spec D43): scheduling is infrastructure,
         and a test calls this directly with a pinned date rather than waiting
         for 03:00 to come round. Omit the date and the injected clock supplies
         today's (spec D5).
 
-        The sweep does not *decide* anything. Expiry takes effect the moment
-        the clock passes it (spec D18), so a lot is already out of the balance
-        and already in the history before this runs; what the sweep adds is the
+        Two passes, and **vesting comes first** (spec D21), so a bonus vesting
+        tonight is never swept the same night. They are not the same kind of
+        work. Vesting is the sweep *deciding*: a deposit lot reaching an
+        anniversary mints a points lot, and until this runs those points do not
+        exist. Expiry decides nothing — it takes effect the moment the clock
+        passes it (spec D18), so a lot is already out of the balance and
+        already in the history before this runs, and what the sweep adds is the
         permanent ledger entry that says so, stamped with the instant the lot
         died rather than the moment the batch got round to it.
 
-        Because of that, the sweep is re-runnable in every sense the bank cares
-        about (user story 38): running the same business date twice writes
-        nothing the second time, and running a night that was missed writes
-        exactly what that night would have written, so catching two dates up in
-        order lands on the state each night would have left (spec D20).
+        Both are re-runnable in every sense the bank cares about (user story
+        38): running the same business date twice writes nothing the second
+        time, and running a night that was missed writes exactly what that
+        night would have written, so catching two dates up in order lands on
+        the state each night would have left (spec D20). Expiry is keyed by the
+        lot it writes off and vesting by the deposit lot and the anniversary it
+        pays, so neither depends on the sweep's own history of runs.
 
-        And because it only records, it can only be asked for a night that
-        has happened. A business date in the future is refused: what a lot
-        will be worth on a night that has not come depends on what the
-        customer spends between now and then, so materialising it would freeze
-        an amount that is not settled yet — and a lot is written off exactly
-        once (spec D20), so no later night could ever correct it. The ledger
-        would say 200 points expired where 100 did. Tonight and any night
+        It can only be asked for a night that has happened. A business date in
+        the future is refused: what a lot will be worth on a night that has not
+        come depends on what the customer spends between now and then, so
+        materialising it would freeze an amount that is not settled yet — and a
+        lot is written off exactly once (spec D20), so no later night could
+        ever correct it. The ledger would say 200 points expired where 100 did.
+        The bonus has the same reason of its own: what a lot is worth on an
+        anniversary depends on what the customer withdraws before it, and a
+        bonus paid early could not be taken back either. Tonight and any night
         missed behind it are the only real questions, and both are answered
         here.
         """
@@ -528,11 +597,10 @@ class SavingStreakService:
         #: still the customer's to spend until it does.
         horizon = min(swept_at, self._clock.now())
         lots_expired = points_expired = 0
-        customers: set[str] = set()
-        with self._ledger.atomically():
-            # Spec D21: the ticket that adds the loyalty-rate bonus vests due
-            # deposit lots here, *before* anything expires, so a bonus vesting
-            # tonight is never swept the same night.
+        with self._ledger.atomically(), self._deposit_ledger.atomically():
+            # Spec D21: vesting runs *before* anything expires, so a bonus
+            # vesting tonight is never swept the same night.
+            vested, points_vested, customers = self._vest_anniversaries(on, horizon)
             for customer_id in self._ledger.customers_with_unmaterialised_lots():
                 written = self._ledger.materialised_lot_ids(customer_id)
                 for lot in self._ledger.position(customer_id, horizon).expired_lots:
@@ -552,6 +620,8 @@ class SavingStreakService:
         return SweepResult(
             business_date=on,
             swept_at=swept_at,
+            anniversaries_vested=vested,
+            points_vested=points_vested,
             lots_expired=lots_expired,
             points_expired=points_expired,
             customers_affected=len(customers),
@@ -667,6 +737,76 @@ class SavingStreakService:
         """
         moment = as_of if as_of is not None else self._clock.now()
         return readable_instant(moment, "as_of" if as_of is not None else "the clock")
+
+    def _vest_anniversaries(
+        self, business_date: date, horizon: datetime
+    ) -> tuple[int, int, set[str]]:
+        """Pay every deposit lot that has reached an anniversary (spec D22).
+
+        The single crossing of spec D6, and it crosses one way only: the money
+        side is **read** and the points side is written. A vesting lot mints an
+        ordinary points lot dated the anniversary, with its own fresh twelve
+        months from that date (spec D19) — spendable, and later giftable, like
+        any other. No deposit lot is consumed, so the customer's money is
+        exactly where it was; the bonus is minted, not moved.
+
+        What it pays is 10% of the base points of the portion **still
+        standing** (spec D22), which is what the deposit-lot replay already
+        works out: a withdrawal that only partly covered a lot left the rest
+        of it standing under its original deposit date, so that lot keeps its
+        anniversary and vests on the smaller amount (spec D25). A lot nothing
+        survives on is not in the position at all and vests nothing.
+
+        The rate is taken on the lot's standing money every year, never on
+        base-plus-accrued, so it does not compound: year three on an untouched
+        €100 pays 10 points, not 12 (spec D23).
+
+        Idempotent per anniversary rather than per night (spec D20). The pair
+        of deposit lot and anniversary is the key, read off the vesting entries
+        already written, so running a night twice pays once and a night that
+        was missed pays exactly what it owed when it is caught up.
+
+        `business_date` is what decides which anniversaries are due, not
+        `horizon`: an anniversary is a date, not an instant, so a lot deposited
+        at 03:30 vests in the 03:00 sweep on its anniversary rather than
+        waiting a further day. The two agree anyway — the horizon is the
+        sweep's own 03:00 stamp, or the present if the sweep is running before
+        it, and both fall on the business date — and `horizon` still does the
+        job it does for expiry: it is the instant the money side is read at,
+        so the sweep never reads a position into the future (spec D5, D18).
+
+        The bonus is therefore stamped at the **start** of the anniversary
+        date, not at the hour the deposit happened to land. The sweep must
+        never write an entry stamped after the horizon it is running to: the
+        balance is a replay of every entry on record, and a lot dated this
+        afternoon would retire this morning's points this morning. Starting
+        the day is also what makes spec D21 mean something — a year's bonus
+        expires at the start of the day the next year's vests, in that order,
+        which is the steady state of one year's bonus in hand.
+        """
+        vested_count = points_vested = 0
+        customers: set[str] = set()
+        for customer_id in self._deposit_ledger.customers_with_lots():
+            vested = self._ledger.vested_anniversaries(customer_id)
+            for lot in self._deposit_ledger.position(customer_id, horizon).lots:
+                points = bonus_points_for(lot.outstanding_eur)
+                if not points:
+                    continue
+                for anniversary in anniversaries_through(lot.deposited_at, business_date):
+                    if (lot.deposit_id, anniversary) in vested:
+                        continue
+                    self._ledger.append(
+                        customer_id=customer_id,
+                        occurred_at=_start_of(anniversary),
+                        points=points,
+                        reason=MovementReason.VESTING,
+                        description=_vesting_of(lot, points),
+                        deposit_id=lot.deposit_id,
+                    )
+                    vested_count += 1
+                    points_vested += points
+                    customers.add(customer_id)
+        return vested_count, points_vested, customers
 
     def _pending_expiries(self, customer_id: str, as_of: datetime) -> list[PointsMovement]:
         """The expiries that have happened but have not been written down.

@@ -17,6 +17,7 @@ const REASON_LABELS = {
   deposit_reversal: 'Deposit reversed',
   claim: 'Claimed',
   expiry: 'Expired',
+  vesting: 'Loyalty bonus',
 }
 
 const money = value => new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR' }).format(value)

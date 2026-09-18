@@ -25,7 +25,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 
 from .clock import add_months, in_brussels
 from .db import atomically
@@ -393,6 +393,37 @@ class PointsLedger:
             (customer_id, MovementReason.EXPIRY.value),
         ).fetchall()
         return {int(row["lot_id"]) for row in rows}
+
+    def vested_anniversaries(self, customer_id: str) -> set[tuple[str, date]]:
+        """The deposit-lot anniversaries the sweep has already paid a bonus for.
+
+        The vesting sweep's idempotency key, per business date and across them
+        (spec D20): a lot vests once per anniversary however many times the
+        sweep runs, and a night that failed is replayed without paying twice.
+
+        The vesting entry *is* the record, the way an expiry entry is the
+        record of a lot written off (`materialised_lot_ids`): it names the
+        deposit whose lot earned it and is stamped with the anniversary it
+        paid for, so there is nothing to keep in a second table that could
+        disagree with the ledger. A bonus that floored to nothing (spec D24)
+        writes no entry and appears in no key — which needs no special case,
+        because re-running pays it nothing a second time too.
+
+        The pair is matched on the anniversary **date**, which is what an
+        anniversary is — spec D27 clamps calendar days, not instants. Matching
+        the stored stamp as text would be the same key today, because the entry
+        is written at the start of that day, and would quietly stop being the
+        same key the moment anything moved that stamp.
+        """
+        rows = self._conn.execute(
+            "SELECT deposit_id, occurred_at FROM points_ledger"
+            " WHERE customer_id = ? AND reason = ? AND deposit_id IS NOT NULL",
+            (customer_id, MovementReason.VESTING.value),
+        ).fetchall()
+        return {
+            (row["deposit_id"], datetime.fromisoformat(row["occurred_at"]).date())
+            for row in rows
+        }
 
     def customers_with_unmaterialised_lots(self) -> list[str]:
         """Every customer holding a lot whose expiry has not been written yet.

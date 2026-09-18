@@ -90,7 +90,7 @@ def test_an_untouched_deposit_vests_its_first_anniversary_bonus(anniversary_morn
     """
     result = anniversary_morning.run_daily_sweep(ANNIVERSARY_DATE)
 
-    assert (result.lots_vested, result.points_vested) == (1, 100)
+    assert (result.anniversaries_vested, result.points_vested) == (1, 100)
     assert (result.lots_expired, result.points_expired) == (1, 1000)
     assert anniversary_morning.balance(CUSTOMER) == 100
 
@@ -103,12 +103,12 @@ def test_nothing_vests_before_the_anniversary_arrives(service, clock):
 
     result = service.run_daily_sweep()
 
-    assert (result.lots_vested, result.points_vested) == (0, 0)
+    assert (result.anniversaries_vested, result.points_vested) == (0, 0)
     assert service.balance(CUSTOMER) == 1000
 
 
 def test_the_bonus_is_dated_the_anniversary_and_runs_its_own_twelve_months(anniversary_morning):
-    """Spec D19/LB9: dated the anniversary, with a fresh expiry clock from it.
+    """Spec D19: dated the anniversary, with a fresh expiry clock from it.
 
     Read at the seam by asking what the balance will be either side of the
     bonus's own twelfth month — the ledger's expiry column is not this test's
@@ -171,9 +171,9 @@ def test_re_running_the_anniversary_night_vests_the_bonus_once(anniversary_morni
     second = anniversary_morning.run_daily_sweep(ANNIVERSARY_DATE)
     third = anniversary_morning.run_daily_sweep(ANNIVERSARY_DATE)
 
-    assert (first.lots_vested, first.points_vested) == (1, 100)
-    assert (second.lots_vested, second.points_vested) == (0, 0)
-    assert (third.lots_vested, third.points_vested) == (0, 0)
+    assert (first.anniversaries_vested, first.points_vested) == (1, 100)
+    assert (second.anniversaries_vested, second.points_vested) == (0, 0)
+    assert (third.anniversaries_vested, third.points_vested) == (0, 0)
     assert readable(anniversary_morning) == settled
 
 
@@ -184,5 +184,41 @@ def test_the_night_after_the_anniversary_vests_nothing_more(anniversary_morning,
     clock.advance(timedelta(days=1))
     after = anniversary_morning.run_daily_sweep()
 
-    assert (after.lots_vested, after.points_vested) == (0, 0)
+    assert (after.anniversaries_vested, after.points_vested) == (0, 0)
     assert anniversary_morning.balance(CUSTOMER) == 100
+
+
+# ------------------------------------------------------- vest before expire --
+
+
+def test_a_bonus_that_vests_already_dead_is_written_off_the_same_night(service, clock):
+    """Spec D21/LB10, and the one scenario where the *order* is observable.
+
+    Vesting runs before expiry, and for most nights that cannot be told apart
+    from the other order: a bonus minted tonight has twelve months to live, so
+    no sweep could expire it anyway. The order bites when the sweep has not run
+    for over a year. The 2027 anniversary then vests a bonus dated 2027, which
+    reached its own twelve months before this sweep started — it has to be
+    minted *and* written off by the same night. Expiring first would leave it
+    standing unrecorded until some later night got round to it.
+
+    Two years of nothing, caught up in one night: the €1,000 base expires, the
+    2027 bonus vests and dies, and the 2028 bonus vests and lives.
+    """
+    clock.set(DEPOSITED_AT)
+    deposit(service, euros="1000")
+
+    clock.set(in_brussels(datetime(2028, 4, 1, 10, 0)))
+    result = service.run_daily_sweep(date(2028, 4, 1))
+
+    assert (result.anniversaries_vested, result.points_vested) == (2, 200)
+    # Two lots written off, not one: the base, and the 2027 bonus this very
+    # sweep minted. Run the passes the other way round and this is (1, 1000).
+    assert (result.lots_expired, result.points_expired) == (2, 1100)
+    assert service.balance(CUSTOMER) == 100
+
+    settled = readable(service)
+    again = service.run_daily_sweep(date(2028, 4, 1))
+
+    assert (again.anniversaries_vested, again.lots_expired) == (0, 0)
+    assert readable(service) == settled

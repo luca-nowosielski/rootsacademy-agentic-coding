@@ -264,7 +264,7 @@ def test_the_sweep_writes_the_expiry_down_and_changes_nothing_by_running(service
 
     assert result.lots_expired == 1
     assert result.points_expired == 9
-    assert (result.lots_vested, result.points_vested) == (0, 0)
+    assert (result.anniversaries_vested, result.points_vested) == (0, 0)
     assert result.customers_affected == 1
     assert readable(service) == before
 
@@ -345,7 +345,7 @@ def test_one_sweep_covers_every_customer(service, clock):
     result = service.run_daily_sweep()
 
     assert (result.customers_affected, result.lots_expired, result.points_expired) == (2, 2, 35)
-    assert (result.lots_vested, result.points_vested) == (2, 3)
+    assert (result.anniversaries_vested, result.points_vested) == (2, 3)
     # Each customer is left with their own lot's anniversary bonus (spec D22).
     assert service.balance(CUSTOMER) == 1
     assert service.balance(OTHER_CUSTOMER) == 2
@@ -437,8 +437,9 @@ def test_a_clawback_against_expired_points_still_reads_back_negative(service, cl
     base points — and not the 3 the anniversary vested before it bounced. That
     is D11 read strictly, and it is an open question rather than a settled
     rule: whether a deposit that never stood should keep having paid a bonus
-    is the question ticket LB-8 is blocked on. What is settled either way is
-    that the reversed lot stops standing, so no further anniversary vests.
+    is open question 1 of the agreed bonus specification, and the ticket that
+    would settle it is blocked on it. What is settled either way is that the
+    reversed lot stops standing, so no further anniversary vests.
     """
     deposit(service, euros="30", deposit_id="dep-1")
     clock.advance(timedelta(days=366))
@@ -538,7 +539,7 @@ def test_two_lots_dying_in_the_same_instant_read_the_same_before_and_after_the_s
     # also vested the two anniversaries it passed, which is new history rather
     # than a re-ordering of this.
     assert expiries(service) == before
-    assert (result.lots_vested, result.points_vested) == (2, 5)
+    assert (result.anniversaries_vested, result.points_vested) == (2, 5)
 
 
 def test_the_balance_is_the_sum_of_the_history_at_every_instant(service, clock):
@@ -573,7 +574,7 @@ class Timeline:
     #: The loyalty bonus the sweep vests for the anniversaries this timeline
     #: has passed (spec D22). It is not in `balance`, which is read before the
     #: sweep runs: expiry has already happened by then and vesting has not.
-    vested: int = 0
+    vested: int
 
 
 TIMELINES = (

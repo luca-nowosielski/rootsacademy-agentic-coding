@@ -110,10 +110,11 @@ class SweepResult:
 
     business_date: date
     swept_at: datetime
-    #: Deposit lots that reached an anniversary and paid a bonus (spec D22).
-    #: A lot whose bonus floored to nothing is not one of them: nothing was
-    #: written, so there is nothing for a re-run to report differently.
-    lots_vested: int
+    #: Anniversaries that paid a bonus (spec D22) — not lots, because one lot
+    #: caught up over three years pays three of them. An anniversary whose
+    #: bonus floored to nothing is not counted: nothing was written, so there
+    #: is nothing for a re-run to report differently.
+    anniversaries_vested: int
     points_vested: int
     lots_expired: int
     points_expired: int
@@ -186,8 +187,9 @@ def _vesting_of(lot: DepositLot, points: int) -> str:
     amount standing is what a withdrawal may since have changed (spec D25). A
     support agent reading the line back has the whole sum in front of them.
     """
+    rate = f"{(BONUS_RATE * 100).normalize():f}%"  # the rate as told: `10%`
     return (
-        f"Loyalty bonus: {points} points, {_rate()} of the"
+        f"Loyalty bonus: {points} points, {rate} of the"
         f" {_euros(lot.outstanding_eur)} still standing from the deposit on"
         f" {lot.deposited_at.date().isoformat()}"
     )
@@ -196,11 +198,6 @@ def _vesting_of(lot: DepositLot, points: int) -> str:
 def _start_of(business_date: date) -> datetime:
     """Midnight opening `business_date` in Brussels (spec D5)."""
     return in_brussels(datetime.combine(business_date, time()))
-
-
-def _rate() -> str:
-    """The loyalty rate as the customer is told it: `10%`."""
-    return f"{(BONUS_RATE * 100).normalize():f}%"
 
 
 def _deposit_lot_of(amount_eur: Decimal, account_id: str) -> str:
@@ -603,7 +600,7 @@ class SavingStreakService:
         with self._ledger.atomically(), self._deposit_ledger.atomically():
             # Spec D21: vesting runs *before* anything expires, so a bonus
             # vesting tonight is never swept the same night.
-            lots_vested, points_vested, customers = self._vest_anniversaries(on, horizon)
+            vested, points_vested, customers = self._vest_anniversaries(on, horizon)
             for customer_id in self._ledger.customers_with_unmaterialised_lots():
                 written = self._ledger.materialised_lot_ids(customer_id)
                 for lot in self._ledger.position(customer_id, horizon).expired_lots:
@@ -623,7 +620,7 @@ class SavingStreakService:
         return SweepResult(
             business_date=on,
             swept_at=swept_at,
-            lots_vested=lots_vested,
+            anniversaries_vested=vested,
             points_vested=points_vested,
             lots_expired=lots_expired,
             points_expired=points_expired,
@@ -787,7 +784,7 @@ class SavingStreakService:
         expires at the start of the day the next year's vests, in that order,
         which is the steady state of one year's bonus in hand.
         """
-        lots_vested = points_vested = 0
+        vested_count = points_vested = 0
         customers: set[str] = set()
         for customer_id in self._deposit_ledger.customers_with_lots():
             vested = self._ledger.vested_anniversaries(customer_id)
@@ -806,10 +803,10 @@ class SavingStreakService:
                         description=_vesting_of(lot, points),
                         deposit_id=lot.deposit_id,
                     )
-                    lots_vested += 1
+                    vested_count += 1
                     points_vested += points
                     customers.add(customer_id)
-        return lots_vested, points_vested, customers
+        return vested_count, points_vested, customers
 
     def _pending_expiries(self, customer_id: str, as_of: datetime) -> list[PointsMovement]:
         """The expiries that have happened but have not been written down.

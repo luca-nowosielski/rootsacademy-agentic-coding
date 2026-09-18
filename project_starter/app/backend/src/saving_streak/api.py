@@ -278,7 +278,7 @@ class SweepRequest(BaseModel):
 class SweepResponse(BaseModel):
     business_date: date
     swept_at: datetime
-    lots_vested: int
+    anniversaries_vested: int
     points_vested: int
     lots_expired: int
     points_expired: int
@@ -289,7 +289,7 @@ class SweepResponse(BaseModel):
         return cls(
             business_date=result.business_date,
             swept_at=result.swept_at,
-            lots_vested=result.lots_vested,
+            anniversaries_vested=result.anniversaries_vested,
             points_vested=result.points_vested,
             lots_expired=result.lots_expired,
             points_expired=result.points_expired,

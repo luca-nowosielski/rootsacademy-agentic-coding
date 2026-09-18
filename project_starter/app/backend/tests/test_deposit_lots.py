@@ -471,8 +471,8 @@ def test_a_points_lot_expiring_never_touches_a_deposit_lot(service, clock):
     assert (second.lots_expired, second.points_expired) == (0, 0)
     # The anniversary the sweep passed vested 10 points against the €100 still
     # standing (spec D22), and took nothing off the money side to pay them.
-    assert (first.lots_vested, first.points_vested) == (1, 10)
-    assert (second.lots_vested, second.points_vested) == (0, 0)
+    assert (first.anniversaries_vested, first.points_vested) == (1, 10)
+    assert (second.anniversaries_vested, second.points_vested) == (0, 0)
     assert service.balance(CUSTOMER) == 10
     assert before == after_one == standing(service) == [(Decimal("100.00"), "2028-03-14")]
 

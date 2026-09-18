@@ -433,7 +433,7 @@ def test_the_sweep_endpoint_is_re_runnable(client, clock):
     ).json()["movements"]
 
     assert (again["lots_expired"], again["points_expired"]) == (0, 0)
-    assert (again["lots_vested"], again["points_vested"]) == (0, 0)
+    assert (again["anniversaries_vested"], again["points_vested"]) == (0, 0)
     # The anniversary the sweep passed vested its loyalty bonus (spec D22),
     # dated the start of that day and so reading under the expiry later on it.
     assert [(m["points"], m["reason"]) for m in history] == [

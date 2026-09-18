@@ -433,24 +433,27 @@ def test_an_expiry_does_not_take_points_the_customer_had_already_spent(service, 
 def test_a_clawback_against_expired_points_still_reads_back_negative(service, clock):
     """Spec D11 survives expiry: nothing is floored, and nothing is taken twice.
 
-    The reversal claws back **exactly what the deposit credited** — its 30
-    base points — and not the 3 the anniversary vested before it bounced. That
-    is D11 read strictly, and it is an open question rather than a settled
-    rule: whether a deposit that never stood should keep having paid a bonus
-    is open question 1 of the agreed bonus specification, and the ticket that
-    would settle it is blocked on it. What is settled either way is that the
-    reversed lot stops standing, so no further anniversary vests.
+    The reversal lands before any sweep has run, so no anniversary has vested
+    and the only points on record are the ones the deposit credited. That is
+    deliberate. Whether a bonus already vested would *also* be clawed back is
+    open question 1 of the agreed bonus specification — "D26 protects vested
+    bonuses from *withdrawal*, which is a different event from reversal" — and
+    the ticket that would settle it is blocked on that decision. A test is no
+    place to answer it by accident, so this one is arranged not to ask.
+
+    The reversed lot stops standing either way, so the sweep that follows
+    vests nothing from it.
     """
     deposit(service, euros="30", deposit_id="dep-1")
     clock.advance(timedelta(days=366))
-    service.run_daily_sweep()
 
     service.handle(DepositReversed(customer_id=CUSTOMER, deposit_id="dep-1"))
+    service.run_daily_sweep()
 
-    assert service.balance(CUSTOMER) == -27
+    assert service.balance(CUSTOMER) == -30
 
     deposit(service, euros="30", deposit_id="dep-2")
-    assert service.balance(CUSTOMER) == 3
+    assert service.balance(CUSTOMER) == 0
 
 
 def test_a_sweep_cannot_be_run_for_a_night_that_has_not_happened(service, clock):

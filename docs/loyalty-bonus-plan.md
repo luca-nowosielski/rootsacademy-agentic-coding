@@ -4,6 +4,16 @@ Ordered tickets for the spec in `loyalty-bonus-spec.md`. Each is a vertical slic
 with a customer-visible outcome, not a layer. Rule references are `LB*` from that
 spec; `D*` and `T*` are from `project_starter/saving-streak-spec.md`.
 
+> **Status note — this plan is the original decomposition, not the current state.**
+> LB-1 is merged, and it delivered more than its own slice: recurrence over
+> successive anniversaries reaches into LB-2, LB-5 and LB-6, because a sweep that
+> has been down for over a year would otherwise silently underpay. LB-2 and LB-5
+> are now test-only; LB-3 keeps the one piece of production code the bonus still
+> gets wrong; LB-6's third acceptance criterion was invalidated by LB-1 settling
+> open question 2 and must be rewritten before it is picked up. The re-scoped
+> tickets under `.scratch/loyalty-bonus/issues/` are the current truth; the
+> sections below are kept as the record of what was planned.
+
 ## Where the feature lands
 
 The groundwork is already in place, and the seam is pre-marked. Inside
@@ -54,7 +64,8 @@ ordering has to be right in this ticket, not a later one.
 
 **Changes.** Vesting pass at the marked slot in `run_daily_sweep`, bounded by the
 same `horizon = min(swept_at, clock.now())` the expiry pass uses. New
-`MovementReason.VESTING`. `SweepResult` gains `lots_vested` and `points_vested`.
+`MovementReason.VESTING`. `SweepResult` gains `anniversaries_vested` and
+`points_vested`.
 Deposit ledger gains a due-lots query and a materialised-vesting record keyed by
 (lot, anniversary) for idempotency.
 
